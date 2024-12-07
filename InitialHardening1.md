@@ -49,9 +49,10 @@ function Test-Requirements {
         Write-Host "$service Service: $($svc ? $svc.Status : 'Not Found')" -ForegroundColor ($svc ? 'Green' : 'Red')
     }
 
-    # Check Drive Space
-    $drive = Get-PSDrive E
-    Write-Host "E: Drive Space Available: $([math]::Round($drive.Free/1GB, 2)) GB" -ForegroundColor ($drive.Free -gt 1GB ? 'Green' : 'Red')
+    # Check if Server Core
+    $isCore = (Get-ItemProperty -Path "HKLM:\Software\Microsoft\Windows NT\CurrentVersion" -Name "InstallationType").InstallationType -eq "Server Core"
+    Write-Host "Server Core Installation: $($isCore ? 'Yes' : 'No')" -ForegroundColor ($isCore ? 'Green' : 'Red')   
+
 }
 
 Test-Requirements
@@ -218,22 +219,21 @@ try {
     Write-Log "ERROR: Failed to change DSRM password: $_"
 }
 
-# Disable Guest account
+# Disable Guest account using net user
 try {
-    $guestAccount = Get-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
-    if ($null -ne $guestAccount) {
-        Disable-LocalUser -Name "Guest" -ErrorAction Stop
+    $process = Start-Process "net" -ArgumentList "user guest /active:no" -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -eq 0) {
         Write-Log "Guest account disabled successfully"
         
         # Verify guest account is disabled
-        $guestStatus = Get-LocalUser -Name "Guest"
-        if (-not $guestStatus.Enabled) {
+        $guestStatus = net user guest | Select-String "Account active"
+        if ($guestStatus -match "No") {
             Write-Log "Verified Guest account is disabled"
         } else {
             Write-Log "WARNING: Guest account may still be enabled"
         }
     } else {
-        Write-Log "Guest account not found or already disabled"
+        Write-Log "ERROR: Failed to disable Guest account"
     }
 } catch {
     Write-Log "ERROR: Failed to disable Guest account: $_"
@@ -568,14 +568,24 @@ foreach ($service in $services.Keys) {
     }
 }
 
-# Configure Windows Firewall
+# Configure Windows Firewall using netsh
 try {
-    Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True -ErrorAction Stop
-    $fwStatus = Get-NetFirewallProfile | Select-Object Name, Enabled
-    Write-Log "Firewall profiles configured:"
-    $fwStatus | ForEach-Object {
-        Write-Log "Profile $($_.Name): Enabled=$($_.Enabled)"
+    $profiles = @("domain", "private", "public")
+    foreach ($profile in $profiles) {
+        $process = Start-Process "netsh" -ArgumentList "advfirewall set $profile state on" -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            Write-Log "Successfully enabled firewall for $profile profile"
+        } else {
+            Write-Log "WARNING: Failed to enable firewall for $profile profile"
+        }
     }
+    
+    # Verify firewall status
+    $verifyProcess = Start-Process "netsh" -ArgumentList "advfirewall show allprofiles state" -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$env:TEMP\fw_status.txt"
+    $status = Get-Content "$env:TEMP\fw_status.txt"
+    Write-Log "Firewall Status:"
+    Write-Log ($status | Out-String)
+    Remove-Item "$env:TEMP\fw_status.txt" -Force
 } catch {
     Write-Log "ERROR: Failed to configure firewall: $_"
 }
@@ -600,17 +610,20 @@ Write-Host "`nScript execution completed. Check the log file for details: $LogFi
 
 # Add to 5-AdditionalHardening\Additional-Hardening.ps1
 
-# Network Interface Hardening
+# Network Interface Hardening using netsh
 Write-Log "Configuring network interfaces..."
 try {
-    # Disable IPv6 on all interfaces
-    Get-NetAdapter | ForEach-Object {
-        Set-NetAdapterBinding -InterfaceAlias $_.Name -ComponentID 'ms_tcpip6' -Enabled $false
-        Write-Log "Disabled IPv6 on interface $($_.Name)"
-    }
+    # Disable IPv6 using registry
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -Value 0xff -Type DWord
+    Write-Log "Disabled IPv6 via registry"
 
-    # Set DNS servers explicitly on management interface
-    Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses "172.20.242.200"
+    # Set DNS servers using netsh
+    $process = Start-Process "netsh" -ArgumentList 'interface ipv4 set dns name="Ethernet" static 172.20.242.200' -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -eq 0) {
+        Write-Log "Successfully set DNS server"
+    } else {
+        Write-Log "WARNING: Failed to set DNS server"
+    }
 } catch {
     Write-Log "ERROR: Failed to configure network interfaces: $_"
 }
@@ -626,6 +639,29 @@ try {
     Write-Log "Event log sizes increased"
 } catch {
     Write-Log "ERROR: Failed to configure event logs: $_"
+}
+
+# Server Core specific hardening
+Write-Log "Applying Server Core specific hardening..."
+try {
+    # Disable Server Manager remote management
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name "DoNotOpenServerManagerAtLogon" -Value 1
+    Write-Log "Disabled Server Manager remote management"
+
+    # Configure WinRM for secure remote management
+    Write-Log "Configuring WinRM..."
+    $process = Start-Process "winrm" -ArgumentList "quickconfig -quiet" -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -eq 0) {
+        Write-Log "WinRM basic configuration completed"
+        
+        # Enable PSRemoting
+        Enable-PSRemoting -Force
+        Write-Log "Enabled PowerShell remoting"
+    } else {
+        Write-Log "WARNING: WinRM configuration failed"
+    }
+} catch {
+    Write-Log "ERROR: Failed to apply Server Core specific hardening: $_"
 }
 
 ```
@@ -680,6 +716,10 @@ function Compare-SystemState {
 ## How to Use These Scripts
 
 ### Preparation (Before Competition):
+
+cd E:\Scripts
+mkdir "0-PreCheck", "1-Baseline", "2-Passwords", "3-DHCP", "4-DNS", "5-AdditionalHardening", "6-Monitoring"
+
 1. Create the folder structure:
 ```powershell
 New-Item -ItemType Directory -Force -Path "E:\Scripts\0-PreCheck"

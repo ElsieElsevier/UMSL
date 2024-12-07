@@ -69,5 +69,4 @@ sudo ./harden_ubuntu.sh
 # Manually triggering a Lynis scan
 sudo lynis audit system
 
-# checking
 sudo lynis audit system --tests 'ACCT-9628'
