@@ -5,8 +5,8 @@
 echo "Starting Ubuntu 20.04 Quick Hardening Script..."
 
 # Update and Upgrade
-echo "Updating and upgrading packages..."
-sudo apt update && sudo apt upgrade -y
+echo "Updating packages..."
+sudo apt update -y
 
 # Install essential security packages
 echo "Installing security tools (UFW, fail2ban)..."
